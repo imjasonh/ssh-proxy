@@ -2,175 +2,90 @@
 package sshproxy
 
 import (
-	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/http"
-	"time"
 
 	"github.com/chainguard-dev/clog"
 	"github.com/gorilla/websocket"
-	"golang.org/x/crypto/ssh"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		// Allow connections from any origin for now
-		// In production, you'd want to restrict this
-		// TODO: Implement proper origin checking
-		return true
-	},
-}
+func ProxyWebSocketToSSH(tcpAddr string, upgrader websocket.Upgrader) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log := clog.FromContext(r.Context())
 
-// WebSocketServer handles WebSocket connections that tunnel SSH
-type WebSocketServer struct {
-	sshConfig *ssh.ServerConfig
-	handler   func(ssh.Channel, <-chan *ssh.Request, *ssh.Permissions)
-}
-
-// NewWebSocketServer creates a new SSH-over-WebSocket server
-func NewWebSocketServer(sshConfig *ssh.ServerConfig, handler func(ssh.Channel, <-chan *ssh.Request, *ssh.Permissions)) *WebSocketServer {
-	return &WebSocketServer{
-		sshConfig: sshConfig,
-		handler:   handler,
-	}
-}
-
-// ServeHTTP handles WebSocket upgrade and SSH tunneling
-func (s *WebSocketServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	log := clog.FromContext(ctx)
-
-	log.Info("WebSocket connection request", "remote", r.RemoteAddr)
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Error("WebSocket upgrade failed", "error", err)
-		return
-	}
-	defer conn.Close()
-
-	log.Info("WebSocket connection established", "remote", r.RemoteAddr)
-
-	// Create bidirectional pipes for SSH connection
-	clientReader, clientWriter := io.Pipe()
-	serverReader, serverWriter := io.Pipe()
-
-	// Handle SSH connection in a goroutine
-	go func() {
-		sshConn, chans, reqs, err := ssh.NewServerConn(&pipeConn{
-			Reader: clientReader,
-			Writer: serverWriter,
-		}, s.sshConfig)
+		// Upgrade HTTP connection to WebSocket
+		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			log.Error("SSH handshake failed", "error", err)
-			_ = clientWriter.Close()
-			_ = serverWriter.Close()
+			log.Error("Failed to upgrade WebSocket connection", "error", err)
 			return
 		}
-		defer sshConn.Close()
+		defer conn.Close()
 
-		log.Info("SSH connection established", "user", sshConn.User())
-
-		// Handle SSH requests
-		go ssh.DiscardRequests(reqs)
-
-		// Handle SSH channels
-		for newChannel := range chans {
-			if newChannel.ChannelType() != "session" {
-				_ = newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
-				continue
-			}
-
-			channel, requests, err := newChannel.Accept()
-			if err != nil {
-				log.Error("Failed to accept channel", "error", err)
-				continue
-			}
-
-			go s.handler(channel, requests, sshConn.Permissions)
+		// Connect to local SSH server
+		tcpConn, err := net.Dial("tcp", tcpAddr)
+		if err != nil {
+			log.Error("Failed to connect to SSH server", "error", err, "address", tcpAddr)
+			return
 		}
-	}()
+		defer tcpConn.Close()
 
-	// Bridge WebSocket and SSH connections
-	errCh := make(chan error, 2)
+		log.Info("WebSocket connection established", "remote_addr", r.RemoteAddr)
 
-	// WebSocket -> SSH
-	go func() {
-		defer clientWriter.Close()
-		for {
-			messageType, message, err := conn.ReadMessage()
-			if err != nil {
-				log.Debug("WebSocket read error", "error", err)
-				errCh <- err
-				return
-			}
+		// Create bidirectional proxy
 
-			log.Debug("Received WebSocket message", "type", messageType, "size", len(message))
-			if messageType == websocket.BinaryMessage {
-				_, err = clientWriter.Write(message)
+		// WebSocket -> TCP
+		done := make(chan string)
+		go func() {
+			defer func() {
+				select {
+				case done <- "ws_to_tcp_closed":
+				default: // other goroutine already closed, don't block
+				}
+			}()
+			for {
+				messageType, data, err := conn.ReadMessage()
 				if err != nil {
-					log.Debug("Pipe write error", "error", err)
-					errCh <- err
+					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+						log.Error("Unexpected WebSocket closure", "error", err)
+					}
+					// TODO: what other errors need to be handled here?
 					return
 				}
-			} else if messageType == websocket.TextMessage {
-				// Handle base64-encoded binary data for browser compatibility
-				decoded, err := base64.StdEncoding.DecodeString(string(message))
-				if err != nil {
-					log.Warn("Failed to decode base64 message", "error", err)
-					continue
+				if messageType == websocket.BinaryMessage {
+					if _, err := tcpConn.Write(data); err != nil {
+						log.Error("TCP write error", "error", err)
+						return
+					}
 				}
-				_, err = clientWriter.Write(decoded)
-				if err != nil {
-					errCh <- err
+			}
+		}()
+
+		// TCP -> WebSocket
+		go func() {
+			defer func() {
+				select {
+				case done <- "tcp_to_ws_closed":
+				default: // other goroutine already closed, don't block
+				}
+			}()
+			buf := make([]byte, 4096)
+			for {
+				n, err := tcpConn.Read(buf)
+				if err != nil && !errors.Is(err, io.EOF) {
+					log.Error("TCP read error", "error", err)
+					return
+				}
+				if err = conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+					log.Error("WebSocket write error", "error", err)
 					return
 				}
 			}
-		}
-	}()
+		}()
 
-	// SSH -> WebSocket
-	go func() {
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := serverReader.Read(buf)
-			if err != nil {
-				errCh <- err
-				return
-			}
-
-			err = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
-			if err != nil {
-				errCh <- err
-				return
-			}
-		}
-	}()
-
-	// Wait for error or connection close
-	<-errCh
-	log.Info("WebSocket connection closed", "remote", r.RemoteAddr)
-}
-
-// pipeConn wraps io.Reader and io.Writer to implement net.Conn
-type pipeConn struct {
-	io.Reader
-	io.Writer
-}
-
-func (c *pipeConn) Close() error {
-	if closer, ok := c.Writer.(io.Closer); ok {
-		_ = closer.Close()
+		// Wait for either direction to close
+		msg := <-done
+		log.Info("WebSocket proxy connection closed", "reason", msg)
 	}
-	if closer, ok := c.Reader.(io.Closer); ok {
-		_ = closer.Close()
-	}
-	return nil
 }
-
-func (c *pipeConn) LocalAddr() net.Addr                { return &net.TCPAddr{} }
-func (c *pipeConn) RemoteAddr() net.Addr               { return &net.TCPAddr{} }
-func (c *pipeConn) SetDeadline(t time.Time) error      { return nil }
-func (c *pipeConn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *pipeConn) SetWriteDeadline(t time.Time) error { return nil }

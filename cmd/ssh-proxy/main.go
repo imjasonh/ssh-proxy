@@ -21,10 +21,7 @@ var env = envconfig.MustProcess(context.Background(), &struct {
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	if err := sshproxy.NewProxy(sshproxy.ProxyConfig{
-		WebsocketURL: env.WebsocketURL,
-		SSHAddr:      env.SSHAddr,
-	}).Start(ctx); err != nil {
+	if err := sshproxy.NewProxy(env.WebsocketURL, env.SSHAddr).Start(ctx); err != nil {
 		clog.FatalContext(ctx, "failed to start SSH proxy", "error", err)
 	}
 }

@@ -2,7 +2,6 @@ package sshproxy
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -15,39 +14,28 @@ import (
 	"google.golang.org/api/idtoken"
 )
 
-// ProxyConfig holds configuration for the SSH proxy
-type ProxyConfig struct {
+// Proxy handles SSH-to-WebSocket proxying
+type Proxy struct {
 	WebsocketURL string
 	SSHAddr      string
 }
 
-// Proxy handles SSH-to-WebSocket proxying
-type Proxy struct {
-	config ProxyConfig
-}
-
 // NewProxy creates a new SSH proxy
-func NewProxy(config ProxyConfig) *Proxy {
-	return &Proxy{config: config}
+func NewProxy(websocketURL, sshAddr string) *Proxy {
+	return &Proxy{WebsocketURL: websocketURL, SSHAddr: sshAddr}
 }
 
 // Start starts the SSH proxy server
 func (p *Proxy) Start(ctx context.Context) error {
 	log := clog.FromContext(ctx)
 
-	// Parse the URL to validate it
-	u, err := url.Parse(p.config.WebsocketURL)
+	listener, err := net.Listen("tcp", p.SSHAddr)
 	if err != nil {
-		return fmt.Errorf("invalid WebSocket URL: %w", err)
-	}
-
-	listener, err := net.Listen("tcp", p.config.SSHAddr)
-	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", p.config.SSHAddr, err)
+		return fmt.Errorf("failed to listen on %s: %w", p.SSHAddr, err)
 	}
 	defer listener.Close()
 
-	log.Info("SSH proxy listening", "address", p.config.SSHAddr, "forwarding", p.config.WebsocketURL)
+	log.Info("SSH proxy listening", "address", p.SSHAddr, "forwarding", p.WebsocketURL)
 
 	// Accept SSH connections and proxy them to WebSocket
 	for {
@@ -63,128 +51,39 @@ func (p *Proxy) Start(ctx context.Context) error {
 			continue
 		}
 
-		go p.handleSSHConnection(ctx, conn, u)
+		go ProxySSHToWebSocket(ctx, conn, p.WebsocketURL)
 	}
-}
-
-func (p *Proxy) handleSSHConnection(ctx context.Context, sshConn net.Conn, wsURL *url.URL) {
-	ctx = clog.WithValues(ctx, "remote_addr", sshConn.RemoteAddr())
-	log := clog.FromContext(ctx)
-	defer sshConn.Close()
-
-	// Get identity token for authentication to Cloud Run
-	audience := fmt.Sprintf("https://%s", wsURL.Host)
-
-	// Get ID token
-	log.Info("Getting identity token for WebSocket authentication", "audience", audience)
-	tokenSource, err := idtoken.NewTokenSource(ctx, audience)
-	if err != nil {
-		log.Info("Failed to create token source", "error", err)
-		return
-	}
-
-	token, err := tokenSource.Token()
-	if err != nil {
-		log.Info("Failed to get identity token", "error", err)
-		return
-	}
-	log.Info("Got identity token, expires at", "expiry", token.Expiry)
-
-	// Create WebSocket dialer
-	dialer := websocket.DefaultDialer
-
-	// Create request headers with authentication
-	header := http.Header{}
-	header.Set("Authorization", fmt.Sprintf("Bearer %s", token.AccessToken))
-	log.Info("Connecting to WebSocket URL with auth header", "wsURL", wsURL.String())
-
-	// Connect to WebSocket with authentication
-	wsConn, resp, err := dialer.Dial(wsURL.String(), header)
-	if err != nil {
-		log.Info("Failed to connect to WebSocket", "error", err)
-		if resp != nil {
-			log.Info("Response status", "status", fmt.Sprintf("%d %s", resp.StatusCode, resp.Status))
-			_ = resp.Body.Close()
-		}
-		return
-	}
-	if resp != nil {
-		_ = resp.Body.Close()
-	}
-	defer wsConn.Close()
-
-	log.Info("Proxying SSH connection")
-
-	// Create error channel for goroutines
-	errCh := make(chan error, 2)
-
-	// SSH -> WebSocket
-	go func() {
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := sshConn.Read(buf)
-			if err != nil {
-				errCh <- err
-				return
-			}
-
-			// Send as binary message
-			err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
-			if err != nil {
-				errCh <- err
-				return
-			}
-		}
-	}()
-
-	// WebSocket -> SSH
-	go func() {
-		for {
-			messageType, message, err := wsConn.ReadMessage()
-			if err != nil {
-				errCh <- err
-				return
-			}
-
-			var data []byte
-			switch messageType {
-			case websocket.BinaryMessage:
-				data = message
-			case websocket.TextMessage:
-				// Decode base64 if text message
-				decoded, err := base64.StdEncoding.DecodeString(string(message))
-				if err != nil {
-					log.Info("Failed to decode base64", "error", err)
-					continue
-				}
-				data = decoded
-			default:
-				continue
-			}
-
-			_, err = sshConn.Write(data)
-			if err != nil {
-				errCh <- err
-				return
-			}
-		}
-	}()
-
-	// Wait for error
-	<-errCh
-	log.Info("Connection closed for SSH")
 }
 
 // ProxySSHToWebSocket creates a bidirectional proxy between SSH and WebSocket
-func ProxySSHToWebSocket(ctx context.Context, sshConn net.Conn, wsURL string) error {
-	// Connect to WebSocket
-	dialer := websocket.DefaultDialer
-	wsConn, resp, err := dialer.Dial(wsURL, nil)
+func ProxySSHToWebSocket(ctx context.Context, sshConn net.Conn, wsAddr string) error {
+	log := clog.FromContext(ctx)
+
+	wsURL, err := url.Parse(wsAddr)
 	if err != nil {
-		return fmt.Errorf("connecting to WebSocket: %w", err)
+		return fmt.Errorf("failed to parse WebSocket URL: %w", err)
 	}
+
+	audience := fmt.Sprintf("https://%s", wsURL.Host)
+	log.Info("Getting identity token for WebSocket authentication", "audience", audience)
+	tokenSource, err := idtoken.NewTokenSource(ctx, audience)
+	if err != nil {
+		return fmt.Errorf("failed to create token source: %w", err)
+	}
+	token, err := tokenSource.Token()
+	if err != nil {
+		return fmt.Errorf("failed to get identity token: %w", err)
+	}
+
+	// Connect to WebSocket with authentication
+	header := http.Header{}
+	header.Set("Authorization", fmt.Sprintf("Bearer %s", token.AccessToken))
+	wsConn, resp, err := websocket.DefaultDialer.Dial(wsURL.String(), header)
 	if resp != nil {
-		_ = resp.Body.Close()
+		defer resp.Body.Close()
+	}
+	if err != nil {
+		return fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
 	defer wsConn.Close()
 
@@ -203,8 +102,7 @@ func ProxySSHToWebSocket(ctx context.Context, sshConn net.Conn, wsURL string) er
 				return
 			}
 
-			err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
-			if err != nil {
+			if err := wsConn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
 				errCh <- err
 				return
 			}
@@ -222,8 +120,7 @@ func ProxySSHToWebSocket(ctx context.Context, sshConn net.Conn, wsURL string) er
 				return
 			}
 
-			_, err = sshConn.Write(message)
-			if err != nil {
+			if _, err := sshConn.Write(message); err != nil {
 				errCh <- err
 				return
 			}
