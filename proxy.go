@@ -11,6 +11,7 @@ import (
 
 	"github.com/chainguard-dev/clog"
 	"github.com/gorilla/websocket"
+	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
 )
 
@@ -35,6 +36,18 @@ func (p *Proxy) Start(ctx context.Context) error {
 	}
 	defer listener.Close()
 
+	wsURL, err := url.Parse(p.WebsocketURL)
+	if err != nil {
+		return fmt.Errorf("failed to parse WebSocket URL: %w", err)
+	}
+
+	audience := fmt.Sprintf("https://%s", wsURL.Host)
+	log.Info("Getting identity token for WebSocket authentication", "audience", audience)
+	ts, err := idtoken.NewTokenSource(ctx, audience)
+	if err != nil {
+		return fmt.Errorf("failed to create token source: %w", err)
+	}
+
 	log.Info("SSH proxy listening", "address", p.SSHAddr, "forwarding", p.WebsocketURL)
 
 	// Accept SSH connections and proxy them to WebSocket
@@ -51,26 +64,13 @@ func (p *Proxy) Start(ctx context.Context) error {
 			continue
 		}
 
-		go ProxySSHToWebSocket(ctx, conn, p.WebsocketURL)
+		go ProxySSHToWebSocket(ctx, conn, wsURL, ts)
 	}
 }
 
 // ProxySSHToWebSocket creates a bidirectional proxy between SSH and WebSocket
-func ProxySSHToWebSocket(ctx context.Context, sshConn net.Conn, wsAddr string) error {
-	log := clog.FromContext(ctx)
-
-	wsURL, err := url.Parse(wsAddr)
-	if err != nil {
-		return fmt.Errorf("failed to parse WebSocket URL: %w", err)
-	}
-
-	audience := fmt.Sprintf("https://%s", wsURL.Host)
-	log.Info("Getting identity token for WebSocket authentication", "audience", audience)
-	tokenSource, err := idtoken.NewTokenSource(ctx, audience)
-	if err != nil {
-		return fmt.Errorf("failed to create token source: %w", err)
-	}
-	token, err := tokenSource.Token()
+func ProxySSHToWebSocket(ctx context.Context, sshConn net.Conn, wsURL *url.URL, ts oauth2.TokenSource) error {
+	token, err := ts.Token()
 	if err != nil {
 		return fmt.Errorf("failed to get identity token: %w", err)
 	}

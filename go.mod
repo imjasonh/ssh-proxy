@@ -4,8 +4,10 @@ go 1.23.0
 
 require (
 	github.com/chainguard-dev/clog v1.7.0
+	github.com/google/go-cmp v0.7.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/sethvargo/go-envconfig v1.3.0
+	golang.org/x/oauth2 v0.30.0
 	google.golang.org/api v0.246.0
 )
 
@@ -26,7 +28,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.36.0 // indirect
 	golang.org/x/crypto v0.41.0 // indirect
 	golang.org/x/net v0.42.0 // indirect
-	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250728155136-f173205681a0 // indirect
