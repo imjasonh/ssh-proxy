@@ -1,59 +1,45 @@
 # SSH Proxy
 
-A Go proxy server for proxying incoming SSH connections to backend services over WebSockets, designed for Cloud Run deployments.
+A Go library and proxy server for tunneling SSH connections over WebSockets, designed for Cloud Run apps that don't support raw TCP connections.
 
 ## Overview
 
-SSH Proxy provides two main components:
+SSH Proxy provides two main functions:
 
-1. **SSH Proxy Server** - Forwards SSH connections to a WebSocket backend
-2. **Websocket Wrapper Package** - Wraps an existing SSH server implementation in a WebSocket façade, to receive WebSocket requests.
+1. **SSH → WebSocket Proxy** - Accepts SSH connections and forwards them to a WebSocket backend on Cloud Run.
+2. **WebSocket → SSH Proxy** - Accepts WebSocket connections and forwards them to a local SSH server implementation.
 
-This allows you to deploy SSH services on platforms that don't support raw TCP connections (like Cloud Run) by tunneling SSH over WebSocket/HTTP.
+This allows you to deploy SSH services on Cloud Run by tunneling SSH traffic over HTTP/WebSocket connections.
 
 ## Usage
 
-### Wrap your SSH server implementation as a WebSocket server.
+### SSH → WebSocket Proxy
+
+Use the SSH proxy command to forward local SSH connections to a WebSocket endpoint.
+
+You can run this in [GKE Autopilot](https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-overview) for a minimal, cost-effective and low-maintenance environment to proxy requests.
+
+### WebSocket → SSH Proxy
+
+Create a WebSocket handler that forwards connections to a local SSH server:
 
 ```go
 import (
-    "golang.org/x/crypto/ssh"
+    "net/http"
+    "github.com/gorilla/websocket"
     sshproxy "github.com/imjasonh/ssh-proxy"
 )
 
-// Create WebSocket wrapper
-wsServer := sshproxy.NewWebSocketServer(&ssh.ServerConfig{
-    PublicKeyCallback: yourAuthFunction,
-}, func(channel ssh.Channel, requests <-chan *ssh.Request, perms *ssh.Permissions) {
-    // Handle SSH session
-})
+upgrader := websocket.Upgrader{
+    // Accept requests from all origins; consider changing this.
+    CheckOrigin: func(r *http.Request) bool { return true },
+}
 
-// Serve over HTTP
-http.Handle("/ssh", wsServer)
+// Forward WebSocket connections to local SSH server at :22
+http.Handle("/ssh", sshproxy.ProxyWebSocketToSSH(":22", upgrader))
 http.ListenAndServe(":8080", nil)
 ```
 
-### SSH Proxy Server (for external access)
-
-Use the provided `ssh-proxy` command locally, or integrate into your own application:
-
-```bash
-# Set environment variables
-export WEBSOCKET_URL="wss://your-service.run.app/ssh"
-export SSH_ADDR=":2222"
-
-# Run the proxy
-ssh-proxy
-
-# Connect via SSH
-ssh user@localhost -p 2222
-```
-
-You can run this server in GKE Autopilot behind a GCLB load balancer, and expose SSH servers running on Cloud Run.
 ## Authentication
 
-The SSH proxy supports Google Cloud identity token authentication for secure WebSocket connections to Cloud Run services, so the Cloud Run service can be configured to only accept requests from the proxy.
-
-## Examples
-
-See the `cmd/ssh-proxy` directory for a complete example implementation.
+The SSH proxy supports Google Cloud identity token authentication for secure WebSocket connections. When connecting to Cloud Run services, the proxy automatically obtains and includes identity tokens in the Authorization header.

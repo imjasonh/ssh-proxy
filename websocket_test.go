@@ -54,7 +54,7 @@ func TestProxyWebSocketToSSH_BidirectionalTraffic(t *testing.T) {
 	}()
 
 	// Create test server with proxy handler
-	server := httptest.NewServer(http.HandlerFunc(ProxyWebSocketToSSH(actualAddr, upgrader)))
+	server := httptest.NewServer(ProxyWebSocketToSSH(actualAddr, upgrader))
 	defer server.Close()
 
 	// Connect WebSocket client
@@ -139,7 +139,7 @@ func TestProxyWebSocketToSSH_MultipleMessages(t *testing.T) {
 	}()
 
 	// Create test server
-	server := httptest.NewServer(http.HandlerFunc(ProxyWebSocketToSSH(actualAddr, upgrader)))
+	server := httptest.NewServer(ProxyWebSocketToSSH(actualAddr, upgrader))
 	defer server.Close()
 
 	// Connect WebSocket client
@@ -213,7 +213,7 @@ func TestProxyWebSocketToSSH_LargeData(t *testing.T) {
 	}()
 
 	// Create test server
-	server := httptest.NewServer(http.HandlerFunc(ProxyWebSocketToSSH(actualAddr, upgrader)))
+	server := httptest.NewServer(ProxyWebSocketToSSH(actualAddr, upgrader))
 	defer server.Close()
 
 	// Connect WebSocket client
@@ -284,7 +284,7 @@ func TestProxyWebSocketToSSH_ConnectionClosed(t *testing.T) {
 	}()
 
 	// Create test server
-	server := httptest.NewServer(http.HandlerFunc(ProxyWebSocketToSSH(actualAddr, upgrader)))
+	server := httptest.NewServer(ProxyWebSocketToSSH(actualAddr, upgrader))
 	defer server.Close()
 
 	// Connect WebSocket client
@@ -327,7 +327,7 @@ func TestProxyWebSocketToSSH_SSHServerUnavailable(t *testing.T) {
 	tempListener.Close() // Close so it becomes unavailable
 
 	// Create test server
-	server := httptest.NewServer(http.HandlerFunc(ProxyWebSocketToSSH(unavailableAddr, upgrader)))
+	server := httptest.NewServer(ProxyWebSocketToSSH(unavailableAddr, upgrader))
 	defer server.Close()
 
 	// Try to connect WebSocket client
