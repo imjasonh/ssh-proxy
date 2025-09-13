@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 
+	secretmanager "cloud.google.com/go/secretmanager/apiv1"
+	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/chainguard-dev/clog"
 	"github.com/gorilla/websocket"
 	"golang.org/x/oauth2"
@@ -19,16 +21,27 @@ import (
 type Proxy struct {
 	WebsocketURL string
 	SSHAddr      string
+	SSHKeySecret string
+
+	sshPrivateKey []byte
 }
 
 // NewProxy creates a new SSH proxy
-func NewProxy(websocketURL, sshAddr string) *Proxy {
-	return &Proxy{WebsocketURL: websocketURL, SSHAddr: sshAddr}
+func NewProxy(websocketURL, sshAddr, sshKeySecret string) *Proxy {
+	return &Proxy{WebsocketURL: websocketURL, SSHAddr: sshAddr, SSHKeySecret: sshKeySecret}
 }
 
 // Start starts the SSH proxy server
 func (p *Proxy) Start(ctx context.Context) error {
 	log := clog.FromContext(ctx)
+
+	// Retrieve SSH private key from Secret Manager.
+	key, err := p.getSSHPrivateKey(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve SSH private key: %w", err)
+	}
+	p.sshPrivateKey = key
+	log.Info("SSH private key loaded from Secret Manager", "secret", p.SSHKeySecret)
 
 	listener, err := net.Listen("tcp", p.SSHAddr)
 	if err != nil {
@@ -74,6 +87,12 @@ func ProxySSHToWebSocket(ctx context.Context, sshConn net.Conn, wsURL *url.URL, 
 	if err != nil {
 		return fmt.Errorf("failed to get identity token: %w", err)
 	}
+
+	clog.InfoContext(ctx, "Proxying SSH connection to WebSocket",
+		"url", wsURL.String(),
+		"local_addr", sshConn.LocalAddr().String(),
+		"remote_addr", sshConn.RemoteAddr().String(),
+	)
 
 	// Connect to WebSocket with authentication
 	header := http.Header{}
@@ -134,4 +153,29 @@ func ProxySSHToWebSocket(ctx context.Context, sshConn net.Conn, wsURL *url.URL, 
 	case err := <-errCh:
 		return err
 	}
+}
+
+// getSSHPrivateKey retrieves the SSH private key from Secret Manager
+func (p *Proxy) getSSHPrivateKey(ctx context.Context) ([]byte, error) {
+	log := clog.FromContext(ctx)
+
+	client, err := secretmanager.NewClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Secret Manager client: %w", err)
+	}
+	defer client.Close()
+
+	// Access the secret version
+	result, err := client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: p.SSHKeySecret})
+	if err != nil {
+		return nil, fmt.Errorf("failed to access secret %s: %w", p.SSHKeySecret, err)
+	}
+
+	log.Info("Successfully retrieved SSH private key from Secret Manager", "secret", p.SSHKeySecret)
+	return result.Payload.Data, nil
+}
+
+// GetSSHPrivateKey returns the loaded SSH private key
+func (p *Proxy) GetSSHPrivateKey() []byte {
+	return p.sshPrivateKey
 }

@@ -15,13 +15,14 @@ import (
 var env = envconfig.MustProcess(context.Background(), &struct {
 	WebsocketURL string `env:"WEBSOCKET_URL,required"`
 	SSHAddr      string `env:"SSH_ADDR,default=:22"`
-	Port         int    `env:"PORT" required:"true" default:"8080"`
+	Port         int    `env:"PORT,default=8080"`
+	SSHKeySecret string `env:"SSH_KEY_SECRET,required"` // full resource name.
 }{})
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	if err := sshproxy.NewProxy(env.WebsocketURL, env.SSHAddr).Start(ctx); err != nil {
+	if err := sshproxy.NewProxy(env.WebsocketURL, env.SSHAddr, env.SSHKeySecret).Start(ctx); err != nil {
 		clog.FatalContext(ctx, "failed to start SSH proxy", "error", err)
 	}
 }
