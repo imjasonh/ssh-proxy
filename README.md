@@ -2,6 +2,8 @@
 
 A Go library and proxy server for tunneling SSH connections over WebSockets, designed for Cloud Run apps that don't support raw TCP connections.
 
+![Architecture Diagram](diagram.png)
+
 ## Overview
 
 SSH Proxy provides two main functions:
