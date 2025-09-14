@@ -45,7 +45,3 @@ http.ListenAndServe(":8080", nil)
 ## Authentication
 
 The SSH proxy supports Google Cloud identity token authentication for secure WebSocket connections. When connecting to Cloud Run services, the proxy automatically obtains and includes identity tokens in the Authorization header.
-
-## SSH Host Key
-
-The SSH server's host key is loaded from Google Cloud Secret Manager at startup.
